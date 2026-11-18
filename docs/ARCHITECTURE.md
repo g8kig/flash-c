@@ -69,13 +69,14 @@ The IDE links the same compiler as `fcc`, so both always behave alike.
   values also travel in `rax` as their `double` bit pattern and are moved to `xmm0`/`xmm1` (SSE2)
   or `d0`/`d1` (NEON) only for the arithmetic instruction; `float` is stored in 4 bytes and
   widened on load.
-* **Calling convention.** Private: arguments are pushed right to left (8 bytes each) on x86-64 or
-  passed in `x0`–`x7` with spill to the stack on AArch64; the caller pops them (x86-64) or the
-  callee cleans up (AArch64), and the result is in `rax` / `x0`. This makes `va_arg` trivial
-  (`stdarg.h` is three macros) and means no ABI compatibility with the host libc is needed or
-  attempted. Structures are passed by value by copying them into the argument slot; a structure
-  result is built in a hidden frame slot of the caller whose address is passed as an extra first
-  argument.
+* **Calling convention.** Private: arguments are evaluated right to left and passed on the stack
+  in contiguous 8-byte slots (or 8-byte-aligned slots for structures) on both x86-64 and AArch64,
+  accessible in the callee at `[rbp+16]` / `[x29+16]` upwards; the caller cleans up the stack on
+  both architectures, and the result is in `rax` / `x0`. 
+  This makes `va_arg` trivial (`stdarg.h` is three macros) and means no ABI compatibility with
+  the host libc is needed or attempted. 
+  Structures are passed by value by copying them into the argument slot; a structure result is
+  built in a hidden frame slot of the caller whose address is passed as an extra first argument.
 * **ELF writer.** One `PT_LOAD` segment (code, data, bss) at `0x400000`. With `-lw` there is an R+X
   segment for the header and code and a page-aligned R+W segment for data and bss; with `-lt` also
   `.symtab`, `.strtab` and section headers. Addresses are absolute 32-bit values with fixups
@@ -225,7 +226,7 @@ redundancy elimination never moves a load.
 Run after the tree passes (`opt_regalloc`, `gen.c`).
 
 * Locals chosen by use count (weighted by loop depth) live in `rbx` and `r12`-`r15` (x86-64) or
-  `x19`-`x28` (AArch64), which the prologue saves and the epilogue restores.
+  `x19`-`x23` (AArch64), which the prologue saves and the epilogue restores.
 * Instruction selection uses immediate operands, loads a simple right operand straight into `rcx`
   (x86-64) or `x1` (AArch64), fuses a comparison with the branch that uses it, and branches on `!`,
   `&&` and `||` without materializing a boolean. On AArch64, multi-instruction immediates use
@@ -233,8 +234,9 @@ Run after the tree passes (`opt_regalloc`, `gen.c`).
 * Block layout folds `jcc l; jmp m; l:` into `jncc m` and rotates `while` and `for` loops so the
   test sits at the bottom.
 * A tail call to another function pops its arguments into the caller's own argument slots,
-  restores the registers, runs `leave` and jumps (x86-64) or uses `blr` with argument slot
-  reuse (AArch64), only when every variable in the frame is a scalar whose address is never taken.
+  restores the registers, tears down the frame (`leave` on x86-64, or 
+  `mov sp, x29; ldp x29, x30, [sp], #16` on AArch64) and jumps (`jmp` / `b`), only when every
+  variable in the frame is a scalar whose address is never taken.
 
 ### 4.9 Profile-guided optimization and code size
 
@@ -327,11 +329,12 @@ Design points:
 * **`dbgcore.c`.** Runs the executable (a static ELF at fixed addresses) under `ptrace` with its
   stdio on a pseudo terminal. Breakpoints are `int3` bytes (x86-64) or `0xd4200000` AArch64
   instructions inserted only while the program runs. Trace and step single-step until the line
-  changes; a `call` is detected from the opcode and stepped over with a temporary breakpoint at the
-  return address (checking `rsp` / `sp`, so recursion works). Frames are found by following the
-  `rbp` chain (x86-64) or using the link register `LR` (AArch64); locals are `[rbp+off]` /
-  `[sp+off]`. The IDE switches to the user screen (`term_suspend`) only while the program runs
-  freely; during that time keyboard input is forwarded to the pty.
+  changes; a `call` is detected from the opcode and stepped over with a temporary breakpoint at
+  the return address (checking `rsp` / `sp`, so recursion works). Frames are found by following
+  the `rbp` / `x29` chain (using `LR` on AArch64 when stopped at the first instruction of a
+  function before its prologue); locals and parameters are at `[rbp+off]` / `[x29+off]`. 
+  The IDE switches to the user screen (`term_suspend`) only while the program runs freely; 
+  during that time keyboard input is forwarded to the pty.
 * **`dbgeval.c`.** The expression evaluator (C operators on typed values read from
   `/proc/<pid>/mem`), value formatter, inspector lines, frame descriptions and registers. On AArch64
   the debugger shows X0–X28, FP, LR, SP, PC, PSTATE and condition flags.
